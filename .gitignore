@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+data/
+tmp/
+.ftb/
+.tmp_app_schema/
+tests/
+*.log
+config/*.json
+!config/*.example.json

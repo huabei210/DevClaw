@@ -1,0 +1,17 @@
+{
+  "deviceId": "devbox-01",
+  "deviceName": "My Windows PC",
+  "deviceToken": "change-me",
+  "gatewayUrl": "http://127.0.0.1:8787",
+  "dataDir": "./data/agent",
+  "maxQueuedJobs": 50,
+  "workspaces": [
+    {
+      "id": "dev-claw",
+      "name": "dev-claw",
+      "rootPath": "D:\\dev-claw",
+      "assistants": ["codex"],
+      "defaultAssistant": "codex"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "host": "127.0.0.1",
+  "port": 8787,
+  "baseUrl": "http://127.0.0.1:8787",
+  "dataDir": "./data/gateway",
+  "devices": [
+    {
+      "id": "devbox-01",
+      "name": "My Windows PC",
+      "token": "change-me"
+    }
+  ],
+  "feishu": {
+    "enabled": false,
+    "appId": "",
+    "appSecret": ""
+  }
+}
