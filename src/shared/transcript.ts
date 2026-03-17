@@ -15,9 +15,9 @@ export function stripInjectedPromptPreamble(value: string): string {
 }
 
 export function formatTranscriptTimestamp(value: string): string {
-  const isoMatch = value.match(/^\d{4}-(\d{2})-(\d{2})T(\d{2}):(\d{2}):\d{2}/);
+  const isoMatch = value.match(/^\d{4}-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/);
   if (isoMatch) {
-    return `${isoMatch[1]}-${isoMatch[2]} ${isoMatch[3]}:${isoMatch[4]}`;
+    return `${isoMatch[1]}-${isoMatch[2]} ${isoMatch[3]}:${isoMatch[4]}:${isoMatch[5]}`;
   }
 
   const parsed = new Date(value);
@@ -29,5 +29,6 @@ export function formatTranscriptTimestamp(value: string): string {
   const day = String(parsed.getDate()).padStart(2, "0");
   const hours = String(parsed.getHours()).padStart(2, "0");
   const minutes = String(parsed.getMinutes()).padStart(2, "0");
-  return `${month}-${day} ${hours}:${minutes}`;
+  const seconds = String(parsed.getSeconds()).padStart(2, "0");
+  return `${month}-${day} ${hours}:${minutes}:${seconds}`;
 }

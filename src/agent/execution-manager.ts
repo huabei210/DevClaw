@@ -62,7 +62,10 @@ export class ExecutionManager {
     return { queuePosition };
   }
 
-  cancel(requestId: string, threadId?: string): { removedQueued: boolean; active: boolean } {
+  async cancel(
+    requestId: string,
+    threadId?: string
+  ): Promise<{ removedQueued: boolean; active: boolean; stoppedActive: boolean }> {
     const queueIndex = this.queue.findIndex((job) => job.requestId === requestId || (threadId && job.threadId === threadId));
     if (queueIndex >= 0) {
       const [removedJob] = this.queue.splice(queueIndex, 1);
@@ -70,14 +73,16 @@ export class ExecutionManager {
         this.dependencies.clearRuntimeState(removedJob.assistantKind, removedJob.threadId);
       }
       this.emitRunState(removedJob, "cancelled");
-      return { removedQueued: true, active: false };
+      return { removedQueued: true, active: false, stoppedActive: false };
     }
 
     if (this.activeJob && (this.activeJob.requestId === requestId || (threadId && this.activeJob.threadId === threadId))) {
-      return { removedQueued: false, active: true };
+      const adapter = this.dependencies.resolveAdapter(this.activeJob.assistantKind);
+      await adapter.cancelActiveRun?.(threadId ?? this.activeJob.threadId);
+      return { removedQueued: false, active: true, stoppedActive: true };
     }
 
-    return { removedQueued: false, active: false };
+    return { removedQueued: false, active: false, stoppedActive: false };
   }
 
   private async runNext(): Promise<void> {

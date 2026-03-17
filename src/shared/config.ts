@@ -18,25 +18,38 @@ function currentUserHome(): string {
   return process.env.USERPROFILE || process.env.HOME || os.homedir();
 }
 
-function defaultManagedCodexPath(): string {
-  return path.join(currentUserHome(), ".codex", "feishu-thread-bridge", "bin", "codex-official.exe");
+function defaultCodexPath(): string {
+  return "codex";
+}
+
+function normalizeHomeRelativePath(value: string): string {
+  if (value.startsWith("~/") || value.startsWith("~\\")) {
+    return path.join(currentUserHome(), value.slice(2));
+  }
+
+  return value;
 }
 
 function normalizeCodexPath(rawValue: unknown): string {
   if (typeof rawValue !== "string" || !rawValue.trim()) {
-    return defaultManagedCodexPath();
+    return defaultCodexPath();
   }
 
-  const trimmed = rawValue.trim();
-  if (trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
-    return path.join(currentUserHome(), trimmed.slice(2));
-  }
+  const trimmed = normalizeHomeRelativePath(rawValue.trim());
 
   if (trimmed === ".codex" || trimmed.startsWith(".codex/") || trimmed.startsWith(".codex\\")) {
     return path.join(currentUserHome(), trimmed);
   }
 
   return trimmed;
+}
+
+function normalizeClaudePath(rawValue: unknown): string {
+  if (typeof rawValue !== "string" || !rawValue.trim()) {
+    return "claude";
+  }
+
+  return normalizeHomeRelativePath(rawValue.trim());
 }
 
 export function loadGatewayConfig(configPath = process.env.FTB_GATEWAY_CONFIG ?? "config/gateway.json"): GatewayConfig {
@@ -49,7 +62,8 @@ export function loadAgentConfig(configPath = process.env.FTB_AGENT_CONFIG ?? "co
     parsed && typeof parsed === "object"
       ? {
           ...parsed,
-          codexPath: normalizeCodexPath((parsed as { codexPath?: unknown }).codexPath)
+          codexPath: normalizeCodexPath((parsed as { codexPath?: unknown }).codexPath),
+          claudePath: normalizeClaudePath((parsed as { claudePath?: unknown }).claudePath)
         }
       : parsed;
 

@@ -5,10 +5,11 @@
   "description": "Feishu Thread Bridge v1: self-hosted bridge for directing Feishu messages into local Codex threads.",
   "license": "Apache-2.0",
   "scripts": {
+    "dev": "node scripts/dev.js",
     "postinstall": "node scripts/install-official-codex.js",
     "build": "tsc -p tsconfig.json",
-    "dev:gateway": "tsx watch src/gateway/index.ts",
-    "dev:agent": "tsx watch src/agent/index.ts",
+    "dev:gateway": "tsx watch --include src/gateway/**/*.ts --include src/shared/**/*.ts src/gateway/index.ts",
+    "dev:agent": "tsx watch --include src/agent/**/*.ts --include src/adapters/**/*.ts --include src/shared/**/*.ts src/agent/index.ts",
     "install:codex": "node scripts/install-official-codex.js",
     "start:gateway": "node dist/gateway/index.js",
     "start:agent": "node dist/agent/index.js",

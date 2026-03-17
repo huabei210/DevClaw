@@ -1,4 +1,4 @@
-export type AssistantKind = "codex";
+export type AssistantKind = "codex" | "claude";
 export type CodexAppServerReuseScope = "workspace" | "global";
 
 export type ThreadStatus =
@@ -74,6 +74,7 @@ export interface AgentConfig {
   dataDir: string;
   maxQueuedJobs: number;
   codexPath: string;
+  claudePath: string;
   codexAppServerUrl?: string;
   codexAppServerReuseScope: CodexAppServerReuseScope;
   workspaces: WorkspaceConfig[];

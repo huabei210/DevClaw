@@ -13,8 +13,10 @@ import { materializeBinaryReadResult, buildReadFilePreviewText } from "./file-pr
 import { GatewayStateStore } from "./state";
 import { ResolvedThreadMatch, matchThreadByQuery } from "./thread-matching";
 import {
+  buildCompactThreadPrompt,
   buildCommandProgressText,
   buildDirectoryText,
+  buildSessionStatusText,
   buildThreadDetailText,
   buildThreadListHeader,
   buildThreadShortcutText,
@@ -32,6 +34,7 @@ import { makeId, nowIso, safeJsonParse } from "../shared/utils";
 import {
   AgentEvent,
   AgentHelloEnvelope,
+  AssistantKind,
   AttachmentMeta,
   CommandAction,
   CommandEnvelope,
@@ -70,6 +73,8 @@ interface ThreadListOptions {
   title: string;
   threads: ResolvedThreadMatch[];
   workspaceId?: string;
+  assistantKind?: AssistantKind;
+  threadQuery?: string;
   limit?: number;
 }
 
@@ -82,11 +87,19 @@ export class GatewayServer {
   private readonly connections = new Map<string, AgentConnection>();
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly requestContexts = new Map<string, RequestContext>();
+  private readonly conversationTasks = new Map<string, Promise<void>>();
   private readonly feishu = new FeishuService(this.config, {
     renderDashboard: async (conversationId) => this.renderDashboard(conversationId),
-    handleConversationText: async (conversationId, text) => this.handleConversationText(conversationId, text),
-    handleConversationAttachments: async (conversationId, attachments) => this.handleConversationAttachments(conversationId, attachments),
-    handleCardAction: async (value) => this.handleCardAction(value),
+    handleConversationText: async (conversationId, text) =>
+      this.enqueueConversationTask(conversationId, () => this.handleConversationText(conversationId, text)),
+    handleConversationAttachments: async (conversationId, attachments) =>
+      this.enqueueConversationTask(conversationId, () => this.handleConversationAttachments(conversationId, attachments)),
+    handleCardAction: async (value) => {
+      const conversationId = typeof value.conversationId === "string" ? value.conversationId : "";
+      return conversationId
+        ? this.enqueueConversationTask(conversationId, () => this.handleCardAction(value))
+        : this.handleCardAction(value);
+    },
     saveAttachment: (attachment) => this.stateStore.saveAttachment(attachment)
   });
   private readonly upload = multer({ dest: path.join(this.config.dataDir, "incoming") });
@@ -377,7 +390,7 @@ export class GatewayServer {
       this.stateStore.saveConversation(conversation);
       await this.sendConversationReply(
         context.conversationId,
-        `已创建 thread ${formatThreadLabel(event.threadId)}，并设为当前 target。发送普通文本会继续投递到这个 thread。\n\n可用命令：\n/history\n/ls\n/open <path>\n/target`
+        `已创建 thread ${formatThreadLabel(event.threadId)}，并设为当前 target。发送普通文本会继续投递到这个 thread。\n\n可用命令：\n/history\n/status\n/compact\n/ls\n/open <path>\n/stop\n/target`
       );
       return;
     }
@@ -406,19 +419,23 @@ export class GatewayServer {
       return;
     }
 
-    if (event.type === "run.state" && (event.state === "completed" || event.state === "failed")) {
+    if (event.type === "run.state" && (event.state === "completed" || event.state === "failed" || event.state === "cancelled")) {
       for (const conversation of this.stateStore.listConversations()) {
         if (conversation.currentTarget?.threadId === event.threadId) {
           await this.sendConversationReply(
             conversation.conversationId,
             event.state === "completed"
               ? "当前 thread 已完成。可发送新消息继续，或用 /history 查看最近记录。"
-              : "当前 thread 执行失败。可直接补充说明继续，或用 /history 查看最近记录。"
+              : event.state === "cancelled"
+                ? "当前 thread 已停止。可直接补充说明继续，或用 /history 查看最近记录。"
+                : "当前 thread 执行失败。可直接补充说明继续，或用 /history 查看最近记录。"
           );
         } else if (event.threadId) {
           await this.feishu.sendText(
             conversation.conversationId,
-            `后台 thread ${formatThreadLabel(event.threadId)} ${event.state === "completed" ? "已完成" : "执行失败"}`
+            `后台 thread ${formatThreadLabel(event.threadId)} ${
+              event.state === "completed" ? "已完成" : event.state === "cancelled" ? "已停止" : "执行失败"
+            }`
           );
         }
       }
@@ -526,14 +543,25 @@ export class GatewayServer {
     lines.push("");
     lines.push("常用命令：");
     lines.push("/help");
+    lines.push("/dashboard");
+    lines.push("/workspaces");
     lines.push("/target");
     lines.push("/use <threadId>");
-    lines.push("/new <workspaceId>");
+    lines.push("/new <workspaceId> [assistantKind]");
     lines.push("/threads <workspaceId> [count]");
+    lines.push("/threads <workspaceId> <keyword>");
+    lines.push("/threads <workspaceId> <assistantKind>");
+    lines.push("/threads <workspaceId> <assistantKind> [count]");
+    lines.push("/threads <workspaceId> <assistantKind> [count] <keyword>");
+    lines.push("/status");
     lines.push("/history [count]");
-    lines.push("/history <threadId> [count]");
+    lines.push("/history s");
+    lines.push("/history <threadId> [count] [s]");
+    lines.push("/compact");
     lines.push("/ls [path]");
     lines.push("/open <path>");
+    lines.push("/cancel");
+    lines.push("/stop");
 
     return lines.join("\n");
   }
@@ -627,8 +655,8 @@ export class GatewayServer {
       lines.push(`- ${workspace.id}: ${workspace.name} [${workspace.assistants.join(", ")}], 默认 ${workspace.defaultAssistant}`);
     }
     lines.push("");
-    lines.push("新建 thread: /new <workspaceId>");
-    lines.push("列出 threads: /threads <workspaceId>");
+    lines.push("新建 thread: /new <workspaceId> [assistantKind]");
+    lines.push("列出 threads: /threads <workspaceId> [assistantKind] [count]");
     return lines.join("\n");
   }
 
@@ -651,6 +679,48 @@ export class GatewayServer {
     await this.sendConversationReplies(conversationId, messages);
   }
 
+  private async sendStatusResponse(conversationId: string): Promise<void> {
+    const conversation = this.stateStore.getConversation(conversationId);
+    if (conversation.pendingCreateThread && !conversation.currentTarget) {
+      await this.sendConversationReply(
+        conversationId,
+        [
+          "当前会话状态",
+          "模式: 新建 thread",
+          `workspace: ${conversation.pendingCreateThread.workspaceId}`,
+          `assistant: ${conversation.pendingCreateThread.assistantKind}`,
+          `device: ${conversation.pendingCreateThread.deviceId}`,
+          "说明: 下一条普通文本会创建新 thread。"
+        ].join("\n")
+      );
+      return;
+    }
+
+    const target = conversation.currentTarget;
+    if (!target) {
+      await this.sendConversationReply(
+        conversationId,
+        "当前没有 target thread。先发送 /threads <workspaceId> 或 /dashboard 选择会话。"
+      );
+      return;
+    }
+
+    const [transcriptItems, threadSummary] = await Promise.all([
+      this.loadFullTranscriptItems(target),
+      this.findThreadSummary(target)
+    ]);
+
+    await this.sendConversationReply(
+      conversationId,
+      buildSessionStatusText({
+        conversation,
+        target,
+        transcriptItems,
+        threadSummary
+      })
+    );
+  }
+
   private async sendThreadListResponse(conversationId: string, options: ThreadListOptions): Promise<void> {
     const limit = options.limit ?? options.threads.length;
     const sliced = options.threads.slice(0, limit);
@@ -662,7 +732,13 @@ export class GatewayServer {
 
     await this.sendConversationReply(
       conversationId,
-      buildThreadListHeader(options.workspaceId, options.threads.length)
+      buildThreadListHeader({
+        title: options.title,
+        workspaceId: options.workspaceId,
+        assistantKind: options.assistantKind,
+        threadQuery: options.threadQuery,
+        totalThreads: options.threads.length
+      })
     );
 
     for (const thread of sliced) {
@@ -687,6 +763,15 @@ export class GatewayServer {
     } while (cursor);
 
     return pages.flatMap((page) => page.items);
+  }
+
+  private async findThreadSummary(target: TargetRef): Promise<ThreadSummary | undefined> {
+    const threads = (await this.dispatchCommand(target.deviceId, "list_threads", {
+      workspaceId: target.workspaceId,
+      assistantKind: target.assistantKind
+    })) as ThreadSummary[];
+
+    return threads.find((thread) => thread.threadId === target.threadId);
   }
 
   private applyCurrentTarget(conversation: ConversationState, match: ResolvedThreadMatch): void {
@@ -802,6 +887,34 @@ export class GatewayServer {
     return buildReadFilePreviewText(result);
   }
 
+  private async handleCancelCommand(
+    conversationId: string,
+    conversation: ConversationState
+  ): Promise<void> {
+    if (!conversation.currentTarget) {
+      await this.sendConversationReply(conversationId, "当前没有 target thread。");
+      return;
+    }
+
+    const result = await this.dispatchCommand(conversation.currentTarget.deviceId, "cancel_run", {
+      workspaceId: conversation.currentTarget.workspaceId,
+      assistantKind: conversation.currentTarget.assistantKind,
+      threadId: conversation.currentTarget.threadId
+    });
+    const details = result as { removedQueued?: boolean; active?: boolean; stoppedActive?: boolean };
+    if (details.removedQueued) {
+      await this.sendConversationReply(conversationId, "已取消排队中的任务。");
+      return;
+    }
+
+    if (details.active && details.stoppedActive) {
+      await this.sendConversationReply(conversationId, "已向当前运行中的任务发送停止信号，并尝试终止相关子进程。");
+      return;
+    }
+
+    await this.sendConversationReply(conversationId, "当前 thread 没有可取消的排队或运行任务。");
+  }
+
   private async handleConversationText(conversationId: string, text: string): Promise<void> {
     const conversation = this.stateStore.getConversation(conversationId);
     const trimmedText = text.trim();
@@ -849,7 +962,7 @@ export class GatewayServer {
         case "new": {
           const workspaceId = args[0];
           if (!workspaceId) {
-            await this.sendConversationReply(conversationId, "用法: /new <workspaceId>");
+            await this.sendConversationReply(conversationId, "用法: /new <workspaceId> [assistantKind]");
             return;
           }
 
@@ -866,17 +979,20 @@ export class GatewayServer {
             return;
           }
 
-          const requestedAssistant = args[1]?.trim().toLowerCase();
-          if (requestedAssistant && requestedAssistant !== "codex") {
-            await this.sendConversationReply(conversationId, "v1 当前只支持 Codex thread，请使用 /new <workspaceId>");
+          const requestedAssistant = this.parseAssistantKind(args[1]);
+          if (args[1] !== undefined && !requestedAssistant) {
+            await this.sendConversationReply(
+              conversationId,
+              `不支持的 assistant: ${args[1]}\n可选: ${workspace.assistants.join(", ")}`
+            );
             return;
           }
 
-          const assistantKind = workspace.defaultAssistant;
+          const assistantKind = requestedAssistant ?? workspace.defaultAssistant;
           if (!workspace.assistants.includes(assistantKind)) {
             await this.sendConversationReply(
               conversationId,
-              `工作区 ${workspaceId} 未启用 Codex`
+              `工作区 ${workspaceId} 未启用 assistant ${assistantKind}`
             );
             return;
           }
@@ -890,7 +1006,7 @@ export class GatewayServer {
           this.stateStore.saveConversation(conversation);
           await this.sendConversationReply(
             conversationId,
-            `已进入新建 thread 模式。下一条普通文本会在工作区 ${workspaceId} 中创建新的 Codex thread。`
+            `已进入新建 thread 模式。下一条普通文本会在工作区 ${workspaceId} 中创建新的 ${assistantKind} thread。`
           );
           return;
         }
@@ -913,6 +1029,12 @@ export class GatewayServer {
           await this.sendHistoryResponse(conversationId, parsedArgs.pairLimit, parsedArgs.compact);
           return;
         }
+        case "status":
+          await this.sendStatusResponse(conversationId);
+          return;
+        case "compact":
+          await this.handleCompactCommand(conversationId, conversation);
+          return;
         case "ls":
           await this.sendConversationReply(
             conversationId,
@@ -932,18 +1054,9 @@ export class GatewayServer {
           }
           return;
         }
-        case "cancel": {
-          if (!conversation.currentTarget) {
-            await this.sendConversationReply(conversationId, "当前没有 target thread。");
-            return;
-          }
-
-          const result = await this.dispatchCommand(conversation.currentTarget.deviceId, "cancel_run", {
-            workspaceId: conversation.currentTarget.workspaceId,
-            assistantKind: conversation.currentTarget.assistantKind,
-            threadId: conversation.currentTarget.threadId
-          });
-          await this.sendConversationReply(conversationId, `取消结果: ${JSON.stringify(result)}`);
+        case "cancel":
+        case "stop": {
+          await this.handleCancelCommand(conversationId, conversation);
           return;
         }
         default:
@@ -1091,20 +1204,55 @@ export class GatewayServer {
     }
 
     for (const workspace of workspaces) {
+      if (parsedArgs.assistantKind && !workspace.assistants.includes(parsedArgs.assistantKind)) {
+        await this.sendConversationReply(
+          conversationId,
+          `工作区 ${workspace.id} 未启用 assistant ${parsedArgs.assistantKind}\n\n${renderThreadsUsageText(connection.workspaces)}`
+        );
+        return;
+      }
+
       const threads = ((await this.dispatchCommand(deviceId, "list_threads", {
-        workspaceId: workspace.id
+        workspaceId: workspace.id,
+        assistantKind: parsedArgs.assistantKind
       })) as ThreadSummary[]).map((thread) => ({
         deviceId,
         ...thread
       }));
+      const normalizedQuery = parsedArgs.threadQuery?.trim().toLowerCase();
+      const filteredThreads = normalizedQuery
+        ? threads.filter((thread) => (thread.name || thread.threadId).toLowerCase().includes(normalizedQuery))
+        : threads;
 
       await this.sendThreadListResponse(conversationId, {
-        title: `工作区 ${workspace.id} 的 thread 列表`,
-        threads,
+        title: `工作区 ${workspace.id} 的 ${parsedArgs.assistantKind ?? "全部"} thread 列表${
+          parsedArgs.threadQuery ? ` | 标题包含: ${parsedArgs.threadQuery}` : ""
+        }`,
+        threads: filteredThreads,
         workspaceId: workspace.id,
+        assistantKind: parsedArgs.assistantKind,
+        threadQuery: parsedArgs.threadQuery,
         limit: parsedArgs.limit
       });
     }
+  }
+
+  private enqueueConversationTask<T>(conversationId: string, task: () => Promise<T>): Promise<T> {
+    const previousTask = this.conversationTasks.get(conversationId) ?? Promise.resolve();
+    const nextTask = previousTask.catch(() => undefined).then(task);
+    const trackedTask = nextTask.then(
+      () => undefined,
+      () => undefined
+    );
+
+    this.conversationTasks.set(conversationId, trackedTask);
+    void trackedTask.finally(() => {
+      if (this.conversationTasks.get(conversationId) === trackedTask) {
+        this.conversationTasks.delete(conversationId);
+      }
+    });
+
+    return nextTask;
   }
 
   private async handleCardAction(value: Record<string, unknown>): Promise<unknown> {
@@ -1122,7 +1270,7 @@ export class GatewayServer {
         conversation.currentTarget = {
           deviceId: String(value.deviceId),
           workspaceId: String(value.workspaceId),
-          assistantKind: "codex",
+          assistantKind: this.parseAssistantKind(value.assistantKind) ?? "codex",
           threadId: String(value.threadId),
           threadName: String(value.threadName)
         };
@@ -1136,7 +1284,7 @@ export class GatewayServer {
         conversation.pendingCreateThread = {
           deviceId: String(value.deviceId),
           workspaceId: String(value.workspaceId),
-          assistantKind: "codex"
+          assistantKind: this.parseAssistantKind(value.assistantKind) ?? "codex"
         };
         conversation.updatedAt = nowIso();
         this.stateStore.saveConversation(conversation);
@@ -1175,5 +1323,61 @@ export class GatewayServer {
       default:
         return buildInfoCard("未知动作", `未识别的 action: ${action}`);
     }
+  }
+
+  private parseAssistantKind(value: unknown): AssistantKind | undefined {
+    if (value === "codex" || value === "claude") {
+      return value;
+    }
+
+    if (typeof value === "string") {
+      const normalized = value.trim().toLowerCase();
+      if (normalized === "codex" || normalized === "claude") {
+        return normalized;
+      }
+    }
+
+    return undefined;
+  }
+
+  private async handleCompactCommand(conversationId: string, conversation: ConversationState): Promise<void> {
+    const target = conversation.currentTarget;
+    if (!target) {
+      await this.sendConversationReply(
+        conversationId,
+        "当前没有 target thread。请先用 /use <threadId> 选中要压缩的会话。"
+      );
+      return;
+    }
+
+    const transcriptItems = await this.loadFullTranscriptItems(target);
+    if (transcriptItems.length === 0) {
+      await this.sendConversationReply(conversationId, "当前 thread 还没有可压缩的历史。");
+      return;
+    }
+
+    const compactPrompt = buildCompactThreadPrompt(target, transcriptItems);
+    const result = (await this.dispatchCommand(
+      target.deviceId,
+      "create_thread",
+      {
+        workspaceId: target.workspaceId,
+        assistantKind: target.assistantKind,
+        prompt: compactPrompt,
+        attachments: []
+      },
+      {
+        conversationId,
+        action: "create_thread"
+      }
+    )) as { queuePosition?: number };
+
+    const queuePosition = Number(result.queuePosition ?? 0);
+    await this.sendConversationReply(
+      conversationId,
+      queuePosition > 0
+        ? `已开始压缩当前上下文，新的 compact thread 已进入队列，位置 ${queuePosition}。完成后会自动切换到新 thread。`
+        : "已开始压缩当前上下文，新的 compact thread 创建完成后会自动切换为当前 target。"
+    );
   }
 }

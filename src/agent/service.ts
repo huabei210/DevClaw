@@ -1,11 +1,12 @@
 import WebSocket, { RawData } from "ws";
 
+import { ClaudeAdapter } from "../adapters/claude";
 import { CodexAdapter } from "../adapters/codex";
 import { AssistantAdapter } from "../adapters/base";
 import { ExecutionManager, RuntimeThreadState } from "./execution-manager";
 import { loadAgentConfig } from "../shared/config";
 import { listWorkspaceDirectory, readWorkspaceFile } from "../shared/fs-utils";
-import { ensureCodexCommandReady } from "../shared/process-utils";
+import { ensureClaudeCommandReady, ensureCodexCommandReady } from "../shared/process-utils";
 import { nowIso, safeJsonParse } from "../shared/utils";
 import {
   AgentEvent,
@@ -34,6 +35,7 @@ export class AgentService {
         reuseScope: this.config.codexAppServerReuseScope
       })
     );
+    this.adapters.set("claude", new ClaudeAdapter(this.config.claudePath, this.config.gatewayUrl, this.config.deviceToken));
     this.executionManager = new ExecutionManager(
       {
         config: this.config,
@@ -51,7 +53,13 @@ export class AgentService {
   }
 
   async start(): Promise<void> {
-    ensureCodexCommandReady(this.config.codexPath);
+    const configuredAssistants = new Set(this.config.workspaces.flatMap((workspace) => workspace.assistants));
+    if (configuredAssistants.has("codex")) {
+      ensureCodexCommandReady(this.config.codexPath);
+    }
+    if (configuredAssistants.has("claude")) {
+      ensureClaudeCommandReady(this.config.claudePath);
+    }
     this.connect();
   }
 
@@ -156,7 +164,10 @@ export class AgentService {
 
   private async listThreads(payload: Record<string, unknown>) {
     const workspace = this.resolveWorkspace(String(payload.workspaceId));
-    const requestedAssistant: AssistantKind | undefined = payload.assistantKind === "codex" ? "codex" : undefined;
+    const requestedAssistant = this.parseAssistantKind(payload.assistantKind);
+    if (payload.assistantKind !== undefined && !requestedAssistant) {
+      throw new Error(`Unsupported assistant kind: ${String(payload.assistantKind)}`);
+    }
     const assistants = requestedAssistant ? [requestedAssistant] : workspace.assistants;
 
     const threadSummaries = await Promise.all(
@@ -184,6 +195,7 @@ export class AgentService {
   private async openThread(payload: Record<string, unknown>) {
     const workspace = this.resolveWorkspace(String(payload.workspaceId));
     const assistantKind = this.requireAssistantKind(payload.assistantKind);
+    this.ensureWorkspaceSupportsAssistant(workspace, assistantKind);
     const adapter = this.resolveAdapter(assistantKind);
 
     return adapter.getTranscript(
@@ -201,6 +213,7 @@ export class AgentService {
   ): QueuedJob {
     const workspace = this.resolveWorkspace(String(payload.workspaceId));
     const assistantKind = this.requireAssistantKind(payload.assistantKind);
+    this.ensureWorkspaceSupportsAssistant(workspace, assistantKind);
 
     return {
       requestId,
@@ -260,12 +273,27 @@ export class AgentService {
     return adapter;
   }
 
-  private requireAssistantKind(value: unknown): AssistantKind {
-    if (value === "codex") {
+  private parseAssistantKind(value: unknown): AssistantKind | undefined {
+    if (value === "codex" || value === "claude") {
       return value;
     }
 
+    return undefined;
+  }
+
+  private requireAssistantKind(value: unknown): AssistantKind {
+    const assistantKind = this.parseAssistantKind(value);
+    if (assistantKind) {
+      return assistantKind;
+    }
+
     throw new Error(`Unsupported assistant kind: ${String(value ?? "")}`);
+  }
+
+  private ensureWorkspaceSupportsAssistant(workspace: WorkspaceConfig, assistantKind: AssistantKind): void {
+    if (!workspace.assistants.includes(assistantKind)) {
+      throw new Error(`Workspace ${workspace.id} does not support assistant ${assistantKind}`);
+    }
   }
 
   private runtimeKey(assistantKind: AssistantKind, threadId: string): string {

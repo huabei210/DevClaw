@@ -2,27 +2,15 @@
 
 [English](README.en.md)
 
-Self-hosted bridge for sending Feishu messages into local Codex threads.
-
-项目范围很直接：
-- 前端：飞书
-- 后端：本地 Codex
-- 运行形态：一个 `gateway` + 一个或多个本地 `agent`
-- 当前主要环境：Windows
-
-不使用 GUI 自动化。
-不依赖公网 Feishu HTTP 回调。
-飞书事件通过 Feishu WebSocket client 接收。
-
----
+Self-hosted bridge for sending Feishu messages into local AI assistant threads.
 
 ## 1. 这是什么
 
-Feishu Thread Bridge 用来把飞书消息转发到本地 Codex thread。
+Feishu Thread Bridge 用来把飞书消息转发到本地 AI 编程助手 thread。
 
 它能做的事情：
-- 在飞书里继续本地已有的 Codex thread
-- 在飞书里新建 Codex thread
+- 在飞书里继续本地已有的 Codex / Claude thread
+- 在飞书里新建 Codex / Claude thread
 - 查看最近历史记录
 - 向当前 thread 发送文本、图片、文件
 - 在飞书里浏览工作区目录和打开文件
@@ -46,7 +34,7 @@ Feishu Thread Bridge 用来把飞书消息转发到本地 Codex thread。
 这些时候，问题不是“要不要写代码”，而是“能不能马上把这件事开始掉”。
 
 这个项目解决的就是这个问题：
-让你只用手机，就能随时把想法发到家里或办公室那台电脑上的 Codex，会话可以立刻开始，不用等你重新坐回电脑前。
+让你只用手机，就能随时把想法发到家里或办公室那台电脑上的 Codex 或 Claude，会话可以立刻开始，不用等你重新坐回电脑前。
 
 ## 3. 为什么叫 DevClaw
 
@@ -65,20 +53,35 @@ Feishu Thread Bridge 用来把飞书消息转发到本地 Codex thread。
 - 文件
 
 当前支持的命令：
+- `/help`
+- `/dashboard`
+- `/target`
 - `/workspaces`
 - `/threads <workspaceId> [count]`
+- `/threads <workspaceId> <keyword>`
+- `/threads <workspaceId> <assistantKind>`
+- `/threads <workspaceId> <assistantKind> [count]`
+- `/threads <workspaceId> <assistantKind> [count] <keyword>`
 - `/use <threadId>`
-- `/new <workspaceId>`
+- `/new <workspaceId> [assistantKind]`
 - `/history`
 - `/history [count]`
 - `/history s`
 - `/history <threadId> [count] [s]`
+- `/status`
+- `/compact`
 - `/ls [path]`
 - `/open <path>`
 - `/cancel`
+- `/stop`
+
+注意：
+- 实际命令是 `/workspaces` 和 `/threads`
+- 没有 `/workspace` 或 `/thread` 这两个单数命令
 
 当前后端：
-- 只支持 Codex
+- Codex
+- Claude
 
 ## 5. 当前不支持什么
 
@@ -87,15 +90,15 @@ Feishu Thread Bridge 用来把飞书消息转发到本地 Codex thread。
 - 语音转文字
 - Telegram / Discord / 企业微信
 - 独立 Web UI
-- 非 Codex 的其他 Agent 后端
+- 其他尚未接入的 Agent 后端
 
 ## 6. 当前缺陷 / 已知限制
 
 下面这些都是当前事实，不是模糊描述：
 
-- 项目当前只支持 飞书 + Codex。
+- 项目当前支持 飞书 + 本地 Codex / Claude。
 - 飞书语音消息不能用。
-- 从飞书新建的会话，不会立刻出现在 Codex Desktop 里。
+- 从飞书新建的 Codex 会话，不会立刻出现在 Codex Desktop 里。
 - 如果你要在 Codex Desktop 里看到这个新会话，必须重启 Codex Desktop。
 - 在重启桌面客户端之前，这个会话仍然可以继续在飞书里使用。
 
@@ -113,7 +116,7 @@ Feishu Thread Bridge 用来把飞书消息转发到本地 Codex thread。
 ### agent
 - 运行在本地机器上
 - 向 bridge 暴露本地工作区
-- 调用本地 Codex
+- 调用本地 Codex / Claude
 - 列出 thread、打开历史、新建 thread、继续 thread
 - 在允许的工作区内读取目录和文件
 
@@ -129,11 +132,17 @@ Feishu Thread Bridge 用来把飞书消息转发到本地 Codex thread。
 ## 8. 运行要求
 
 推荐环境：
-- Windows
+- Windows / macOS
 - Node.js 20+
 - npm
 - 一个飞书机器人应用
-- 与 `agent` 同机安装的本地 Codex
+- 与 `agent` 同机安装的本地 Codex / Claude，可来自桌面版、CLI 或 VS Code / Cursor 等插件
+
+平台兼容范围：
+- Windows + Codex：官方桌面版、`codex` CLI / npm shim、VS Code / Cursor / Windsurf 插件内置二进制
+- Windows + Claude：`claude` CLI、VS Code / Cursor / Windsurf 的 Claude Code 插件内置二进制
+- macOS + Codex：`Codex.app`、`codex` CLI、VS Code / Cursor / Windsurf 插件内置二进制
+- macOS + Claude：`Claude.app`、`claude` CLI、VS Code / Cursor / Windsurf 的 Claude Code 插件内置二进制
 
 ## 9. 安装
 
@@ -144,6 +153,9 @@ npm install
 ```
 
 项目包含一个 Windows 安装脚本，会在 `postinstall` 阶段尝试复制官方 Codex 可执行文件。
+在 macOS 上不依赖这个安装脚本，bridge 会直接探测本机的 Codex / Claude CLI、App 或插件二进制。
+如果你启用 Claude，还需要本机可直接执行 `claude` 命令，并且本地存在 `~/.claude/projects` 会话目录。
+大多数场景下，`agent.json` 里的 `codexPath` 和 `claudePath` 建议直接省略，让 bridge 自动探测。
 你也可以手动执行：
 
 ```powershell
@@ -160,7 +172,12 @@ npm run install:codex
 - `FTB_GATEWAY_CONFIG`
 - `FTB_AGENT_CONFIG`
 
-### 8.1 gateway.json
+推荐配置原则：
+- 如果你装的是官方默认位置、CLI、或 VS Code / Cursor / Windsurf 插件，通常不用手填 `codexPath` / `claudePath`
+- 只有在你把可执行文件装到自定义位置时，才建议显式填写绝对路径
+- `workspaces[].assistants` 决定 `/threads <workspaceId>` 会列出哪些 assistant 的会话
+
+### 10.1 gateway.json
 
 字段说明：
 - `host`：gateway HTTP 服务监听地址
@@ -168,7 +185,14 @@ npm run install:codex
 - `baseUrl`：agent 下载附件时使用的 gateway 地址
 - `dataDir`：gateway 数据目录
 - `devices`：允许连接的 agent 设备和 token
-- `feishu`：飞书应用配置
+- `feishu.enabled`：是否启用飞书
+- `feishu.interactiveCardsEnabled`：是否启用飞书卡片
+- `feishu.appId`：飞书应用 App ID
+- `feishu.appSecret`：飞书应用 App Secret
+- `feishu.encryptKey`：事件加密 Key，没有可留空
+- `feishu.verificationToken`：事件校验 token，没有可留空
+- `feishu.allowChatIds`：允许访问的会话 ID 白名单，可留空
+- `feishu.notificationChatIds`：接收通知的会话 ID 列表，可留空
 
 最小示例：
 
@@ -193,7 +217,7 @@ npm run install:codex
 }
 ```
 
-### 8.2 agent.json
+### 10.2 agent.json
 
 字段说明：
 - `deviceId`：必须和 `gateway.json` 里的设备 ID 对应
@@ -202,9 +226,37 @@ npm run install:codex
 - `gatewayUrl`：gateway 地址
 - `dataDir`：agent 数据目录
 - `maxQueuedJobs`：本机最大排队任务数
+- `codexPath`：可选，Codex 可执行文件或命令
+- `claudePath`：可选，Claude CLI 可执行文件或命令，默认 `claude`
+- `codexAppServerUrl`：可选，远端 Codex app-server 的 `ws://` / `wss://` 地址
+- `codexAppServerReuseScope`：可选，`workspace` 或 `global`，默认 `workspace`
 - `workspaces`：允许暴露的工作区列表
 
-`codexPath` 可以省略。省略时，程序默认使用当前用户目录下的托管 Codex 可执行文件。
+`codexPath` 可以省略。省略时，程序默认使用 `codex` 命令，并按这个优先级自动探测：
+- 官方 Codex Desktop
+- macOS `Codex.app`
+- VS Code / Cursor / Windsurf 等编辑器内置的 Codex 二进制
+- 系统 PATH 里的 `codex` CLI / npm shim
+
+如果探测到官方 Codex Desktop，bridge 仍会优先复制到本地托管路径后再启动。
+`claudePath` 可以省略。省略时，程序默认直接调用 `claude`，并按当前平台自动探测 Claude CLI / App / 插件二进制。
+
+会话来源说明：
+- `Codex` 的会话列表来自本机 Codex app-server 或 `~/.codex` 会话数据
+- `Claude` 的会话列表来自本机 `~/.claude/projects`
+- 也就是说，`/threads <workspaceId>` 不是只列当前 assistant，而是会列这个工作区里已启用 assistant 的全部会话
+
+Codex 兼容范围：
+- 官方桌面版安装路径
+- macOS `Codex.app`
+- `codex` CLI / npm shim
+- VS Code / Cursor / Windsurf 等编辑器内置的 Codex 可执行文件
+
+Claude 兼容范围：
+- 本机 `claude` CLI
+- macOS `Claude.app`
+- VS Code / Cursor / Windsurf 等编辑器内置的 Claude Code 可执行文件
+- 本机 `~/.claude/projects` 会话目录
 
 最小示例：
 
@@ -216,12 +268,13 @@ npm run install:codex
   "gatewayUrl": "http://127.0.0.1:8787",
   "dataDir": "./data/agent",
   "maxQueuedJobs": 50,
+  "claudePath": "claude",
   "workspaces": [
     {
       "id": "dev-claw",
       "name": "dev-claw",
       "rootPath": "D:/dev-claw",
-      "assistants": ["codex"],
+      "assistants": ["codex", "claude"],
       "defaultAssistant": "codex"
     }
   ]
@@ -247,7 +300,13 @@ npm run install:codex
 
 ## 12. 启动顺序
 
-按这个顺序启动：
+开发时推荐直接一起启动：
+
+```powershell
+npm run dev
+```
+
+如果你要分开看日志，也可以按这个顺序分别启动：
 
 ```powershell
 npm run dev:gateway
@@ -266,8 +325,15 @@ npm run start:agent
 ```
 
 当前开发脚本已经是 watch 模式：
+- `npm run dev`
 - `npm run dev:gateway`
 - `npm run dev:agent`
+
+当前 watch 会显式监听相关源码目录：
+- `gateway` 会监听 `src/gateway` 和 `src/shared`
+- `agent` 会监听 `src/agent`、`src/adapters` 和 `src/shared`
+
+所以修改入口文件之外的依赖文件后，也会自动重启。
 
 ## 13. 第一次连通性检查
 
@@ -275,13 +341,15 @@ npm run start:agent
 
 1. 在飞书里打开机器人会话。
 2. 发送 `/workspaces`。
-3. 发送 `/threads <workspaceId> 1`。
+3. 发送 `/threads <workspaceId> 1` 或 `/threads <workspaceId> claude 1`。
 4. 发送 `/use <threadId>`。
 5. 发送一条普通文本。
 6. 发送 `/history 1`。
 
 如果你在意图片能力，就单独测图片。
 不要因为文本能通，就默认图片也能通。
+
+如果一个工作区同时启用了 `codex` 和 `claude`，第 3 步返回的是两边合并后的最近会话，按更新时间排序。
 
 ## 14. 命令说明
 
@@ -290,33 +358,93 @@ npm run start:agent
 
 ### `/dashboard`
 显示 dashboard 文本或卡片视图。
+它会汇总当前 target、工作区列表，以及最近 thread 的快捷切换项。
+
+### `/target`
+显示当前 target：
+- 当前 device
+- 当前 workspace
+- 当前 assistant
+- 当前 thread
 
 ### `/workspaces`
 列出当前在线设备上配置的工作区。
 
-### `/threads <workspaceId> [count]`
+输出里会告诉你：
+- `workspaceId`
+- 工作区名称
+- 该工作区启用了哪些 assistant
+- 查看该工作区会话列表应该发送什么 `/threads <workspaceId>` 命令
+
+### `/threads`
 列出某个工作区最近的 thread。
 
 规则：
 - `/threads` 不带 `workspaceId` 时，只输出用法说明，不直接列 thread。
 - 默认数量是 4。
-- 最大数量是 20。
+- `count` 可以填写任意正整数；如果你写 40，就最多返回 40 条；如果实际不足 40 条，就把现有结果全部返回。
 - 每条 thread 消息第一行都是 `/use <threadId>`。
+- 如果这个工作区同时启用了 `codex` 和 `claude`，返回结果会把两边会话一起列出，并按最近更新时间排序。
+- 你也可以显式指定 assistant 过滤，只看 `codex` 或只看 `claude`。
+- 你也可以追加关键字，只按标题包含关系筛选结果。
+
+支持写法：
+
+```text
+/threads <workspaceId>
+/threads <workspaceId> <count>
+/threads <workspaceId> <keyword>
+/threads <workspaceId> <assistantKind>
+/threads <workspaceId> <assistantKind> <count>
+/threads <workspaceId> <assistantKind> <keyword>
+/threads <workspaceId> <assistantKind> <count> <keyword>
+```
 
 示例：
 
 ```text
 /threads dev-claw 1
+/threads repo migration
+/threads repo claude
+/threads repo claude 20
+/threads repo claude migration
+/threads repo claude 20 migration
+/threads dev-claw 20
 ```
+
+想看某个工作区下几乎全部近期会话，直接用：
+
+```text
+/threads <workspaceId> 40
+```
+
+想只看某个项目里的 Claude 会话，直接用：
+
+```text
+/threads <workspaceId> claude
+/threads <workspaceId> claude 40
+/threads <workspaceId> claude migration
+/threads <workspaceId> claude 40 migration
+```
+
+想只看 Codex，会把 `claude` 改成 `codex`。
 
 ### `/use <threadId>`
 切换当前目标 thread。
 
 当前成功提示只保留标题，不在末尾重复 thread ID。
 
-### `/new <workspaceId>`
+### `/new <workspaceId> [assistantKind]`
 进入新建 thread 模式。
-下一条普通文本会在该工作区中创建一个新的 Codex thread。
+下一条普通文本会在该工作区中创建一个新的 thread。
+不带 `assistantKind` 时，使用工作区的 `defaultAssistant`。
+
+示例：
+
+```text
+/new dev-claw
+/new dev-claw claude
+```
 
 ### `/history`
 查看当前目标 thread 的全部历史。
@@ -344,7 +472,28 @@ npm run start:agent
 
 输出格式：
 - 标题行：`标题: ...`
-- 消息头：`[user MM-DD HH:mm]` 或 `[assistant MM-DD HH:mm]`
+- 消息头：`[user MM-DD HH:mm:ss]` 或 `[assistant MM-DD HH:mm:ss]`
+
+### `/status`
+查看当前会话状态。
+
+当前会输出：
+- 当前 target 的 device / workspace / assistant / thread
+- 当前 thread 状态
+- 消息数、问答轮数
+- 上下文文本体积（chars / UTF-8 bytes / 粗略 token 估算）
+- 最近一条用户消息和 assistant 消息预览
+
+### `/compact`
+为当前 target thread 创建一个新的压缩 thread，并在创建完成后自动切换过去。
+
+当前行为：
+- bridge 会读取当前 thread 历史
+- bridge 本地生成一个压缩后的 handoff prompt
+- 用同一个 workspace + assistant 新建一个 thread
+- 新 thread 创建完成后，会自动设为当前 target
+
+旧 thread 不会删除，仍然可以用 `/use <threadId>` 切回去。
 
 ### `/ls [path]`
 列出当前工作区目标路径下的文件。
@@ -354,7 +503,13 @@ npm run start:agent
 如果文件是二进制，bridge 会把它作为图片或文件回发到飞书。
 
 ### `/cancel`
-取消当前 thread 上正在执行的任务。
+取消当前 thread 的任务。
+- 如果任务还在队列中，会直接移出队列
+- 如果任务已经在运行，会向当前 assistant 进程发送停止信号，并尝试终止相关子进程树
+
+### `/stop`
+`/cancel` 的兼容别名。
+当前行为与 `/cancel` 完全一致，也会尝试真正停止活动子进程，而不只是取消排队。
 
 ## 15. 图片、文件、语音
 
@@ -364,7 +519,7 @@ npm run start:agent
 
 ### 文件
 支持。
-用户从飞书发送的文件会被 gateway 下载，并走附件链路传给 Codex。
+用户从飞书发送的文件会被 gateway 下载，并走附件链路传给当前 assistant。
 
 ### 语音
 不支持。

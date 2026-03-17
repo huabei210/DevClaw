@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const assistantKindSchema = z.enum(["codex"]);
+export const assistantKindSchema = z.enum(["codex", "claude"]);
 
 export const workspaceSchema = z.object({
   id: z.string().min(1),
@@ -42,6 +42,7 @@ export const agentConfigSchema = z.object({
   dataDir: z.string().min(1),
   maxQueuedJobs: z.number().int().positive(),
   codexPath: z.string().min(1),
+  claudePath: z.string().min(1).default("claude"),
   codexAppServerUrl: z
     .string()
     .url()

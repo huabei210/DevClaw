@@ -5,6 +5,7 @@ import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import readline, { Interface } from "node:readline";
 import WebSocket from "ws";
 
+import { buildPromptWithAttachments, materializeAttachments } from "./attachment-utils";
 import { AssistantAdapter, ContinueThreadInput, CreateThreadInput, paginateTranscript, StreamEventHandler } from "./base";
 import {
   AttachmentMeta,
@@ -15,6 +16,7 @@ import {
   WorkspaceConfig
 } from "../shared/types";
 import { ensureInsideWorkspace } from "../shared/fs-utils";
+import { shouldSpawnDetachedForCleanup, terminateChildProcessTree } from "../shared/process-control";
 import { resolveCodexCommand } from "../shared/process-utils";
 import { stripInjectedPromptPreamble } from "../shared/transcript";
 import { nowIso, safeJsonParse, truncateText } from "../shared/utils";
@@ -123,6 +125,13 @@ interface CodexRpcClient {
 interface CodexAppServerConnectionOptions {
   url?: string;
   reuseScope?: CodexAppServerReuseScope;
+}
+
+interface ActiveCodexRun {
+  workspaceRoot: string;
+  client?: CodexRpcClient;
+  threadId?: string;
+  cancelling: boolean;
 }
 
 const APP_SERVER_REQUEST_TIMEOUT_MS = 20_000;
@@ -602,56 +611,6 @@ function isAppServerUnavailableError(error: unknown): error is CodexAppServerUna
   return error instanceof CodexAppServerUnavailableError;
 }
 
-async function materializeAttachments(
-  workspace: WorkspaceConfig,
-  attachments: AttachmentMeta[],
-  gatewayUrl: string | undefined,
-  deviceToken: string | undefined
-): Promise<AttachmentMeta[]> {
-  if (attachments.length === 0 || !gatewayUrl || !deviceToken) {
-    return attachments;
-  }
-
-  const attachmentRoot = ensureInsideWorkspace(workspace, path.join(".ftb", "attachments"));
-  fs.mkdirSync(attachmentRoot, { recursive: true });
-  const materialized: AttachmentMeta[] = [];
-
-  for (const attachment of attachments) {
-    const response = await fetch(`${gatewayUrl}/api/attachments/${attachment.id}`, {
-      headers: {
-        "x-device-token": deviceToken
-      }
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to download attachment ${attachment.id}: ${response.status}`);
-    }
-
-    const destinationPath = path.join(attachmentRoot, `${attachment.id}_${attachment.name}`);
-    const arrayBuffer = await response.arrayBuffer();
-    fs.writeFileSync(destinationPath, Buffer.from(arrayBuffer));
-
-    materialized.push({
-      ...attachment,
-      storedPath: destinationPath
-    });
-  }
-
-  return materialized;
-}
-
-function buildPrompt(prompt: string, attachments: AttachmentMeta[]): string {
-  if (attachments.length === 0) {
-    return prompt;
-  }
-
-  const attachmentText = attachments
-    .map((attachment) => `- ${attachment.name}: ${attachment.storedPath}`)
-    .join("\n");
-
-  return `${prompt}\n\nAttached local files:\n${attachmentText}`;
-}
-
 class SpawnedCodexAppServerClient implements CodexRpcClient {
   private child?: ChildProcessWithoutNullStreams;
   private stdout?: Interface;
@@ -687,6 +646,7 @@ class SpawnedCodexAppServerClient implements CodexRpcClient {
       this.child = spawn(launchCommand.command, [...launchCommand.args, "app-server"], {
         cwd: this.launchCwd,
         env: process.env,
+        detached: shouldSpawnDetachedForCleanup(),
         windowsHide: true
       });
     } catch (error) {
@@ -789,8 +749,8 @@ class SpawnedCodexAppServerClient implements CodexRpcClient {
 
     await Promise.race([this.closed, delay(APP_SERVER_CLOSE_TIMEOUT_MS)]);
 
-    if (!this.child.killed) {
-      this.child.kill();
+    if (!hasChildExited(this.child)) {
+      await terminateChildProcessTree(this.child);
       await Promise.race([this.closed, delay(APP_SERVER_CLOSE_TIMEOUT_MS)]);
     }
 
@@ -860,6 +820,10 @@ class SpawnedCodexAppServerClient implements CodexRpcClient {
       causeText ? `${message}: ${causeText}${diagnosticText}` : `${message}${diagnosticText}`
     );
   }
+}
+
+function hasChildExited(child: ChildProcessWithoutNullStreams): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
 }
 
 class WebSocketCodexAppServerClient implements CodexRpcClient {
@@ -1047,6 +1011,8 @@ class WebSocketCodexAppServerClient implements CodexRpcClient {
 export class CodexAdapter implements AssistantAdapter {
   readonly kind = "codex" as const;
   private readonly appServers = new Map<string, Promise<CodexRpcClient>>();
+  private readonly activeRuns = new Set<ActiveCodexRun>();
+  private readonly activeRunsByThreadId = new Map<string, ActiveCodexRun>();
   private readonly appServerUrl?: string;
   private readonly appServerReuseScope: CodexAppServerReuseScope;
 
@@ -1135,6 +1101,21 @@ export class CodexAdapter implements AssistantAdapter {
 
   async continueThread(input: ContinueThreadInput, onEvent: StreamEventHandler): Promise<void> {
     await this.runCodex(input.threadId, input, onEvent);
+  }
+
+  async cancelActiveRun(threadId?: string): Promise<void> {
+    const runs = threadId
+      ? [this.activeRunsByThreadId.get(threadId)].filter((run): run is ActiveCodexRun => Boolean(run))
+      : Array.from(this.activeRuns);
+
+    await Promise.all(
+      runs.map(async (run) => {
+        run.cancelling = true;
+        if (run.client) {
+          await this.disposeCodexAppServer(run.workspaceRoot, run.client);
+        }
+      })
+    );
   }
 
   private async withCodexAppServer<T>(
@@ -1313,6 +1294,15 @@ export class CodexAdapter implements AssistantAdapter {
     let threadCreatedEmitted = !shouldEmitCreated;
     let terminalStateEmitted = false;
     const turnCompleted = createDeferred<void>();
+    const activeRun: ActiveCodexRun = {
+      workspaceRoot: input.workspace.rootPath,
+      threadId,
+      cancelling: false
+    };
+    this.activeRuns.add(activeRun);
+    if (threadId) {
+      this.activeRunsByThreadId.set(threadId, activeRun);
+    }
 
     onEvent({
       type: "run.state",
@@ -1321,12 +1311,26 @@ export class CodexAdapter implements AssistantAdapter {
 
     try {
       await this.withCodexAppServer(input.workspace.rootPath, cwd, async (client) => {
+        activeRun.client = client;
+
+        const registerThread = (candidateThreadId: string | undefined) => {
+          if (!candidateThreadId) {
+            return;
+          }
+
+          if (activeThreadId && activeThreadId !== candidateThreadId) {
+            this.activeRunsByThreadId.delete(activeThreadId);
+          }
+
+          activeThreadId = candidateThreadId;
+          activeRun.threadId = candidateThreadId;
+          this.activeRunsByThreadId.set(candidateThreadId, activeRun);
+        };
+
         client.setNotificationHandler((method, params) => {
           if (method === "thread/started") {
             const startedThreadId = (params as { thread?: { id?: string } } | undefined)?.thread?.id;
-            if (startedThreadId && !activeThreadId) {
-              activeThreadId = startedThreadId;
-            }
+            registerThread(startedThreadId);
 
             if (shouldEmitCreated && startedThreadId && !threadCreatedEmitted) {
               threadCreatedEmitted = true;
@@ -1403,7 +1407,7 @@ export class CodexAdapter implements AssistantAdapter {
               approvalPolicy: "never",
               sandbox: "danger-full-access"
             });
-            activeThreadId = forked.thread.id;
+            registerThread(forked.thread.id);
             onEvent({
               type: "thread.created",
               threadId: activeThreadId
@@ -1416,14 +1420,14 @@ export class CodexAdapter implements AssistantAdapter {
             approvalPolicy: "never",
             sandbox: "danger-full-access"
           });
-          activeThreadId = resumed.thread.id;
+          registerThread(resumed.thread.id);
         } else {
           const started = await client.request<AppServerThreadStartResponse>("thread/start", {
             cwd,
             approvalPolicy: "never",
             sandbox: "danger-full-access"
           });
-          activeThreadId = started.thread.id;
+          registerThread(started.thread.id);
 
           if (shouldEmitCreated && !threadCreatedEmitted) {
             threadCreatedEmitted = true;
@@ -1484,6 +1488,17 @@ export class CodexAdapter implements AssistantAdapter {
         ]);
       });
     } catch (error) {
+      if (activeRun.cancelling) {
+        if (!terminalStateEmitted) {
+          onEvent({
+            type: "run.state",
+            state: "cancelled"
+          });
+          terminalStateEmitted = true;
+        }
+        return;
+      }
+
       if (!terminalStateEmitted) {
         const message = error instanceof Error ? error.message : String(error);
         onEvent({
@@ -1502,6 +1517,10 @@ export class CodexAdapter implements AssistantAdapter {
       const client = await this.getActiveCodexAppServer(input.workspace.rootPath);
       client?.setNotificationHandler(undefined);
       if (activeThreadId) {
+        this.activeRunsByThreadId.delete(activeThreadId);
+      }
+      this.activeRuns.delete(activeRun);
+      if (activeThreadId) {
         upsertCodexSessionIndexRow({
           id: activeThreadId,
           thread_name: deriveCodexThreadName(input.prompt, activeThreadId),
@@ -1518,7 +1537,7 @@ export class CodexAdapter implements AssistantAdapter {
     return [
       {
         type: "text",
-        text: buildPrompt(prompt, fileAttachments)
+        text: buildPromptWithAttachments(prompt, fileAttachments)
       },
       ...imageAttachments.map((attachment) => ({
         type: "localImage",

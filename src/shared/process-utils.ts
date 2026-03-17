@@ -9,9 +9,14 @@ export interface ResolvedCommand {
 
 interface ResolveWindowsCommandOptions {
   cwd?: string;
+  platform?: NodeJS.Platform;
 }
 
 interface ResolveCodexCommandOptions extends ResolveWindowsCommandOptions {
+  env?: NodeJS.ProcessEnv;
+}
+
+interface ResolveClaudeCommandOptions extends ResolveWindowsCommandOptions {
   env?: NodeJS.ProcessEnv;
 }
 
@@ -20,6 +25,8 @@ const WINDOWS_DIRECT_EXECUTABLE_EXTENSIONS = new Set([".exe", ".com"]);
 const WINDOWS_PWSH_LAUNCHER_PATH = path.resolve(__dirname, "..", "..", "scripts", "invoke-windows-command.ps1");
 const WINDOWS_OFFICIAL_CODEX_PACKAGE_PREFIX = "OpenAI.Codex_";
 const WINDOWS_OFFICIAL_CODEX_CACHE_PARTS = [".codex", "feishu-thread-bridge", "bin", "codex-official.exe"] as const;
+const WINDOWS_CODEX_EXTENSION_DIRECTORY_PREFIX = "openai.chatgpt-";
+const WINDOWS_CLAUDE_EXTENSION_DIRECTORY_PREFIX = "anthropic.claude-code-";
 const WINDOWS_EDITOR_EXTENSION_MARKERS = [
   "\\.vscode\\extensions\\",
   "\\.cursor\\extensions\\",
@@ -31,6 +38,28 @@ const WINDOWS_NPM_SHIM_MARKERS = [
   "\\program files\\nodejs\\",
   "\\scoop\\shims\\",
   "\\volta\\bin\\"
+] as const;
+const MACOS_APPLICATION_DIRECTORIES = ["/Applications", "~/Applications"] as const;
+const CODEX_EXTENSION_BINARY_CANDIDATES = [
+  ["bin", "windows-x86_64", "codex.exe"],
+  ["bin", "windows-x64", "codex.exe"],
+  ["bin", "darwin-arm64", "codex"],
+  ["bin", "darwin-x64", "codex"],
+  ["bin", "darwin-universal", "codex"],
+  ["bin", "macos-arm64", "codex"],
+  ["bin", "macos-x64", "codex"],
+  ["bin", "macos-universal", "codex"]
+] as const;
+const CLAUDE_EXTENSION_BINARY_CANDIDATES = [
+  ["resources", "native-binary", "claude.exe"],
+  ["resources", "native-binary", "claude"],
+  ["resources", "native-binary", "claude-cli"],
+  ["bin", "darwin-arm64", "claude"],
+  ["bin", "darwin-x64", "claude"],
+  ["bin", "darwin-universal", "claude"],
+  ["bin", "macos-arm64", "claude"],
+  ["bin", "macos-x64", "claude"],
+  ["bin", "macos-universal", "claude"]
 ] as const;
 
 function fileExists(filePath: string): boolean {
@@ -52,6 +81,10 @@ function stripWrappingQuotes(value: string): string {
 function normalizeCommand(command: string): string | undefined {
   const normalizedCommand = stripWrappingQuotes(command.trim());
   return normalizedCommand || undefined;
+}
+
+function currentPlatform(options: { platform?: NodeJS.Platform } = {}): NodeJS.Platform {
+  return options.platform ?? process.platform;
 }
 
 function normalizeWindowsPathForMatch(value: string): string {
@@ -110,22 +143,16 @@ export function resolveWindowsPwshCommand(
   };
 }
 
-function isBareCodexCommand(command: string): boolean {
-  const normalizedCommand = normalizeCommand(command)?.toLowerCase();
-  if (!normalizedCommand) {
-    return false;
+function currentUserHome(env: NodeJS.ProcessEnv = process.env): string {
+  return env.USERPROFILE || env.HOME || os.homedir();
+}
+
+function expandHomePath(value: string, env: NodeJS.ProcessEnv = process.env): string {
+  if (value.startsWith("~/") || value.startsWith("~\\")) {
+    return path.join(currentUserHome(env), value.slice(2));
   }
 
-  if (normalizedCommand.includes("\\") || normalizedCommand.includes("/") || path.isAbsolute(normalizedCommand)) {
-    return false;
-  }
-
-  return (
-    normalizedCommand === "codex" ||
-    normalizedCommand === "codex.cmd" ||
-    normalizedCommand === "codex.exe" ||
-    normalizedCommand === "codex.ps1"
-  );
+  return value;
 }
 
 function parseNumericVersionSegments(version: string): number[] {
@@ -148,18 +175,29 @@ function compareNumericVersionSegments(left: number[], right: number[]): number 
   return 0;
 }
 
-function extractWindowsCodexPackageVersion(directoryName: string): number[] | undefined {
-  if (!directoryName.startsWith(WINDOWS_OFFICIAL_CODEX_PACKAGE_PREFIX)) {
+function extractPackageVersion(directoryName: string, prefix: string): number[] | undefined {
+  if (!directoryName.startsWith(prefix)) {
     return undefined;
   }
 
-  const versionMatch = /^OpenAI\.Codex_(.+?)_[^_]+__/i.exec(directoryName);
-  if (!versionMatch) {
-    return undefined;
-  }
-
-  const versionSegments = parseNumericVersionSegments(versionMatch[1]);
+  const versionPart = directoryName
+    .slice(prefix.length)
+    .replace(/_[^_]+__.*$/i, "")
+    .replace(/-(win32|darwin|linux)\b.*$/i, "");
+  const versionSegments = parseNumericVersionSegments(versionPart);
   return versionSegments.length > 0 ? versionSegments : undefined;
+}
+
+function extractWindowsCodexPackageVersion(directoryName: string): number[] | undefined {
+  return extractPackageVersion(directoryName, WINDOWS_OFFICIAL_CODEX_PACKAGE_PREFIX);
+}
+
+function extractCodexExtensionVersion(directoryName: string): number[] | undefined {
+  return extractPackageVersion(directoryName, WINDOWS_CODEX_EXTENSION_DIRECTORY_PREFIX);
+}
+
+function extractClaudeExtensionVersion(directoryName: string): number[] | undefined {
+  return extractPackageVersion(directoryName, WINDOWS_CLAUDE_EXTENSION_DIRECTORY_PREFIX);
 }
 
 function windowsProgramsRoot(env: NodeJS.ProcessEnv = process.env): string {
@@ -167,8 +205,59 @@ function windowsProgramsRoot(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 function windowsOfficialCodexCachePath(env: NodeJS.ProcessEnv = process.env): string {
-  const userHome = env.USERPROFILE || env.HOME || os.homedir();
-  return path.join(userHome, ...WINDOWS_OFFICIAL_CODEX_CACHE_PARTS);
+  return path.join(currentUserHome(env), ...WINDOWS_OFFICIAL_CODEX_CACHE_PARTS);
+}
+
+function windowsExtensionRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+  const userHome = currentUserHome(env);
+  return [".vscode", ".cursor", ".windsurf"].map((directory) => path.join(userHome, directory, "extensions"));
+}
+
+function macExtensionRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+  const userHome = currentUserHome(env);
+  return [".vscode", ".cursor", ".windsurf"].map((directory) => path.join(userHome, directory, "extensions"));
+}
+
+function findCandidateBinary(extensionRoot: string, candidates: readonly (readonly string[])[]): string | undefined {
+  return candidates
+    .map((parts) => path.join(extensionRoot, ...parts))
+    .find((candidatePath) => fileExists(candidatePath));
+}
+
+function isBareCodexCommand(command: string): boolean {
+  const normalizedCommand = normalizeCommand(command)?.toLowerCase();
+  if (!normalizedCommand) {
+    return false;
+  }
+
+  if (normalizedCommand.includes("\\") || normalizedCommand.includes("/") || path.isAbsolute(normalizedCommand)) {
+    return false;
+  }
+
+  return (
+    normalizedCommand === "codex" ||
+    normalizedCommand === "codex.cmd" ||
+    normalizedCommand === "codex.exe" ||
+    normalizedCommand === "codex.ps1"
+  );
+}
+
+function isBareClaudeCommand(command: string): boolean {
+  const normalizedCommand = normalizeCommand(command)?.toLowerCase();
+  if (!normalizedCommand) {
+    return false;
+  }
+
+  if (normalizedCommand.includes("\\") || normalizedCommand.includes("/") || path.isAbsolute(normalizedCommand)) {
+    return false;
+  }
+
+  return (
+    normalizedCommand === "claude" ||
+    normalizedCommand === "claude.cmd" ||
+    normalizedCommand === "claude.exe" ||
+    normalizedCommand === "claude.ps1"
+  );
 }
 
 function isWindowsOfficialCodexWindowsAppsPath(command: string): boolean {
@@ -178,10 +267,7 @@ function isWindowsOfficialCodexWindowsAppsPath(command: string): boolean {
   }
 
   const normalizedPath = normalizeWindowsPathForMatch(normalizedCommand);
-  return (
-    normalizedPath.includes("\\windowsapps\\openai.codex_") &&
-    normalizedPath.endsWith("\\app\\resources\\codex.exe")
-  );
+  return normalizedPath.includes("\\windowsapps\\openai.codex_") && normalizedPath.endsWith("\\app\\resources\\codex.exe");
 }
 
 function isWindowsEditorBundledCodexCommand(command: string): boolean {
@@ -213,6 +299,58 @@ function isWindowsNpmShimCodexCommand(command: string): boolean {
   return WINDOWS_NPM_SHIM_MARKERS.some((marker) => normalizedPath.includes(marker));
 }
 
+function isWindowsEditorBundledClaudeCommand(command: string): boolean {
+  const normalizedCommand = normalizeCommand(command);
+  if (!normalizedCommand) {
+    return false;
+  }
+
+  const normalizedPath = normalizeWindowsPathForMatch(normalizedCommand);
+  if (!normalizedPath.endsWith("\\claude.exe")) {
+    return false;
+  }
+
+  return normalizedPath.includes("\\anthropic.claude-code-") && normalizedPath.includes("\\resources\\native-binary\\");
+}
+
+function isMacCodexAppCommand(command: string): boolean {
+  const normalizedCommand = normalizeCommand(command);
+  if (!normalizedCommand) {
+    return false;
+  }
+
+  return normalizedCommand.replace(/\\/g, "/").toLowerCase().endsWith("/codex.app/contents/macos/codex");
+}
+
+function isMacEditorBundledCodexCommand(command: string): boolean {
+  const normalizedCommand = normalizeCommand(command);
+  if (!normalizedCommand) {
+    return false;
+  }
+
+  const normalizedPath = normalizedCommand.replace(/\\/g, "/").toLowerCase();
+  return normalizedPath.endsWith("/codex") && normalizedPath.includes("/extensions/openai.chatgpt-");
+}
+
+function isMacClaudeAppCommand(command: string): boolean {
+  const normalizedCommand = normalizeCommand(command);
+  if (!normalizedCommand) {
+    return false;
+  }
+
+  return normalizedCommand.replace(/\\/g, "/").toLowerCase().endsWith("/claude.app/contents/macos/claude");
+}
+
+function isMacEditorBundledClaudeCommand(command: string): boolean {
+  const normalizedCommand = normalizeCommand(command);
+  if (!normalizedCommand) {
+    return false;
+  }
+
+  const normalizedPath = normalizedCommand.replace(/\\/g, "/").toLowerCase();
+  return normalizedPath.endsWith("/claude") && normalizedPath.includes("/extensions/anthropic.claude-code-");
+}
+
 function findPreferredWindowsCodexExecutable(env: NodeJS.ProcessEnv = process.env): string | undefined {
   const windowsAppsRoot = path.join(windowsProgramsRoot(env), "WindowsApps");
   if (!fs.existsSync(windowsAppsRoot)) {
@@ -241,6 +379,92 @@ function findPreferredWindowsCodexExecutable(env: NodeJS.ProcessEnv = process.en
       packageName: entry.name,
       version
     });
+  }
+
+  candidates.sort((left, right) => {
+    const versionComparison = compareNumericVersionSegments(right.version, left.version);
+    if (versionComparison !== 0) {
+      return versionComparison;
+    }
+
+    return right.packageName.localeCompare(left.packageName);
+  });
+
+  return candidates[0]?.candidatePath;
+}
+
+function findPreferredWindowsEditorBundledCodexExecutable(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const candidates: Array<{ candidatePath: string; packageName: string; version: number[] }> = [];
+
+  for (const rootPath of windowsExtensionRoots(env)) {
+    if (!fs.existsSync(rootPath)) {
+      continue;
+    }
+
+    for (const entry of fs.readdirSync(rootPath, { withFileTypes: true })) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+
+      const version = extractCodexExtensionVersion(entry.name);
+      if (!version) {
+        continue;
+      }
+
+      const candidatePath = findCandidateBinary(path.join(rootPath, entry.name), CODEX_EXTENSION_BINARY_CANDIDATES);
+      if (!candidatePath) {
+        continue;
+      }
+
+      candidates.push({
+        candidatePath,
+        packageName: entry.name,
+        version
+      });
+    }
+  }
+
+  candidates.sort((left, right) => {
+    const versionComparison = compareNumericVersionSegments(right.version, left.version);
+    if (versionComparison !== 0) {
+      return versionComparison;
+    }
+
+    return right.packageName.localeCompare(left.packageName);
+  });
+
+  return candidates[0]?.candidatePath;
+}
+
+function findPreferredWindowsClaudeExecutable(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const candidates: Array<{ candidatePath: string; packageName: string; version: number[] }> = [];
+
+  for (const rootPath of windowsExtensionRoots(env)) {
+    if (!fs.existsSync(rootPath)) {
+      continue;
+    }
+
+    for (const entry of fs.readdirSync(rootPath, { withFileTypes: true })) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+
+      const version = extractClaudeExtensionVersion(entry.name);
+      if (!version) {
+        continue;
+      }
+
+      const candidatePath = findCandidateBinary(path.join(rootPath, entry.name), CLAUDE_EXTENSION_BINARY_CANDIDATES);
+      if (!candidatePath) {
+        continue;
+      }
+
+      candidates.push({
+        candidatePath,
+        packageName: entry.name,
+        version
+      });
+    }
   }
 
   candidates.sort((left, right) => {
@@ -293,6 +517,106 @@ function materializePreferredWindowsCodexExecutable(env: NodeJS.ProcessEnv = pro
   return destinationPath;
 }
 
+function findPreferredMacAppExecutable(appName: string, binaryNames: string[], env: NodeJS.ProcessEnv = process.env): string | undefined {
+  for (const directory of MACOS_APPLICATION_DIRECTORIES) {
+    const rootPath = expandHomePath(directory, env);
+    for (const binaryName of binaryNames) {
+      const candidatePath = path.join(rootPath, `${appName}.app`, "Contents", "MacOS", binaryName);
+      if (fileExists(candidatePath)) {
+        return candidatePath;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function findPreferredMacCodexExtensionExecutable(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const candidates: Array<{ candidatePath: string; packageName: string; version: number[] }> = [];
+
+  for (const rootPath of macExtensionRoots(env)) {
+    if (!fs.existsSync(rootPath)) {
+      continue;
+    }
+
+    for (const entry of fs.readdirSync(rootPath, { withFileTypes: true })) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+
+      const version = extractCodexExtensionVersion(entry.name);
+      if (!version) {
+        continue;
+      }
+
+      const candidatePath = findCandidateBinary(path.join(rootPath, entry.name), CODEX_EXTENSION_BINARY_CANDIDATES);
+      if (!candidatePath) {
+        continue;
+      }
+
+      candidates.push({
+        candidatePath,
+        packageName: entry.name,
+        version
+      });
+    }
+  }
+
+  candidates.sort((left, right) => {
+    const versionComparison = compareNumericVersionSegments(right.version, left.version);
+    if (versionComparison !== 0) {
+      return versionComparison;
+    }
+
+    return right.packageName.localeCompare(left.packageName);
+  });
+
+  return candidates[0]?.candidatePath;
+}
+
+function findPreferredMacClaudeExtensionExecutable(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const candidates: Array<{ candidatePath: string; packageName: string; version: number[] }> = [];
+
+  for (const rootPath of macExtensionRoots(env)) {
+    if (!fs.existsSync(rootPath)) {
+      continue;
+    }
+
+    for (const entry of fs.readdirSync(rootPath, { withFileTypes: true })) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+
+      const version = extractClaudeExtensionVersion(entry.name);
+      if (!version) {
+        continue;
+      }
+
+      const candidatePath = findCandidateBinary(path.join(rootPath, entry.name), CLAUDE_EXTENSION_BINARY_CANDIDATES);
+      if (!candidatePath) {
+        continue;
+      }
+
+      candidates.push({
+        candidatePath,
+        packageName: entry.name,
+        version
+      });
+    }
+  }
+
+  candidates.sort((left, right) => {
+    const versionComparison = compareNumericVersionSegments(right.version, left.version);
+    if (versionComparison !== 0) {
+      return versionComparison;
+    }
+
+    return right.packageName.localeCompare(left.packageName);
+  });
+
+  return candidates[0]?.candidatePath;
+}
+
 function shouldTryPreferredWindowsCodexCommand(command: string, env: NodeJS.ProcessEnv = process.env): boolean {
   const normalizedCommand = normalizeCommand(command);
   if (!normalizedCommand) {
@@ -304,8 +628,7 @@ function shouldTryPreferredWindowsCodexCommand(command: string, env: NodeJS.Proc
     isWindowsOfficialCodexWindowsAppsPath(normalizedCommand) ||
     isWindowsEditorBundledCodexCommand(normalizedCommand) ||
     isWindowsNpmShimCodexCommand(normalizedCommand) ||
-    normalizeWindowsPathForMatch(normalizedCommand) ===
-      normalizeWindowsPathForMatch(windowsOfficialCodexCachePath(env))
+    normalizeWindowsPathForMatch(normalizedCommand) === normalizeWindowsPathForMatch(windowsOfficialCodexCachePath(env))
   );
 }
 
@@ -317,10 +640,7 @@ function shouldRequireManagedWindowsCodexExecutable(command: string, env: NodeJS
 
   return (
     isWindowsOfficialCodexWindowsAppsPath(normalizedCommand) ||
-    isWindowsEditorBundledCodexCommand(normalizedCommand) ||
-    isWindowsNpmShimCodexCommand(normalizedCommand) ||
-    normalizeWindowsPathForMatch(normalizedCommand) ===
-      normalizeWindowsPathForMatch(windowsOfficialCodexCachePath(env))
+    normalizeWindowsPathForMatch(normalizedCommand) === normalizeWindowsPathForMatch(windowsOfficialCodexCachePath(env))
   );
 }
 
@@ -333,6 +653,47 @@ function resolvePreferredWindowsCodexCommand(
   }
 
   const preferredExecutable = materializePreferredWindowsCodexExecutable(options.env);
+  if (preferredExecutable) {
+    return {
+      command: preferredExecutable,
+      args: []
+    };
+  }
+
+  const bundledExecutable = findPreferredWindowsEditorBundledCodexExecutable(options.env);
+  if (bundledExecutable) {
+    return {
+      command: bundledExecutable,
+      args: []
+    };
+  }
+
+  return undefined;
+}
+
+function shouldTryPreferredWindowsClaudeCommand(command: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  const normalizedCommand = normalizeCommand(command);
+  if (!normalizedCommand) {
+    return false;
+  }
+
+  return (
+    isBareClaudeCommand(normalizedCommand) ||
+    isWindowsEditorBundledClaudeCommand(normalizedCommand) ||
+    normalizeWindowsPathForMatch(normalizedCommand) ===
+      normalizeWindowsPathForMatch(findPreferredWindowsClaudeExecutable(env) ?? "")
+  );
+}
+
+function resolvePreferredWindowsClaudeCommand(
+  command: string,
+  options: ResolveClaudeCommandOptions = {}
+): ResolvedCommand | undefined {
+  if (!shouldTryPreferredWindowsClaudeCommand(command, options.env)) {
+    return undefined;
+  }
+
+  const preferredExecutable = findPreferredWindowsClaudeExecutable(options.env);
   if (!preferredExecutable) {
     return undefined;
   }
@@ -343,10 +704,86 @@ function resolvePreferredWindowsCodexCommand(
   };
 }
 
+function shouldTryPreferredMacCodexCommand(command: string): boolean {
+  const normalizedCommand = normalizeCommand(command);
+  if (!normalizedCommand) {
+    return false;
+  }
+
+  return isBareCodexCommand(normalizedCommand) || isMacCodexAppCommand(normalizedCommand) || isMacEditorBundledCodexCommand(normalizedCommand);
+}
+
+function resolvePreferredMacCodexCommand(
+  command: string,
+  options: ResolveCodexCommandOptions = {}
+): ResolvedCommand | undefined {
+  if (!shouldTryPreferredMacCodexCommand(command)) {
+    return undefined;
+  }
+
+  const appExecutable = findPreferredMacAppExecutable("Codex", ["Codex", "codex"], options.env);
+  if (appExecutable) {
+    return {
+      command: appExecutable,
+      args: []
+    };
+  }
+
+  const extensionExecutable = findPreferredMacCodexExtensionExecutable(options.env);
+  if (extensionExecutable) {
+    return {
+      command: extensionExecutable,
+      args: []
+    };
+  }
+
+  return undefined;
+}
+
+function shouldTryPreferredMacClaudeCommand(command: string): boolean {
+  const normalizedCommand = normalizeCommand(command);
+  if (!normalizedCommand) {
+    return false;
+  }
+
+  return isBareClaudeCommand(normalizedCommand) || isMacClaudeAppCommand(normalizedCommand) || isMacEditorBundledClaudeCommand(normalizedCommand);
+}
+
+function resolvePreferredMacClaudeCommand(
+  command: string,
+  options: ResolveClaudeCommandOptions = {}
+): ResolvedCommand | undefined {
+  if (!shouldTryPreferredMacClaudeCommand(command)) {
+    return undefined;
+  }
+
+  const appExecutable = findPreferredMacAppExecutable("Claude", ["Claude", "claude"], options.env);
+  if (appExecutable) {
+    return {
+      command: appExecutable,
+      args: []
+    };
+  }
+
+  const extensionExecutable = findPreferredMacClaudeExtensionExecutable(options.env);
+  if (extensionExecutable) {
+    return {
+      command: extensionExecutable,
+      args: []
+    };
+  }
+
+  return undefined;
+}
+
 export function ensureCodexCommandReady(command: string, options: ResolveCodexCommandOptions = {}): ResolvedCommand {
   const resolvedCommand = resolveCodexCommand(command, options);
+  const platform = currentPlatform(options);
 
-  if (process.platform !== "win32") {
+  if (platform !== "win32") {
+    if (path.isAbsolute(resolvedCommand.command) && !fileExists(resolvedCommand.command)) {
+      throw new Error(`Codex executable not found: ${resolvedCommand.command}`);
+    }
     return resolvedCommand;
   }
 
@@ -369,7 +806,12 @@ export function ensureCodexCommandReady(command: string, options: ResolveCodexCo
 }
 
 export function resolveCodexCommand(command: string, options: ResolveCodexCommandOptions = {}): ResolvedCommand {
-  if (process.platform !== "win32") {
+  const platform = currentPlatform(options);
+  if (platform === "darwin") {
+    return resolvePreferredMacCodexCommand(command, options) ?? { command, args: [] };
+  }
+
+  if (platform !== "win32") {
     return {
       command,
       args: []
@@ -378,6 +820,50 @@ export function resolveCodexCommand(command: string, options: ResolveCodexComman
 
   return (
     resolvePreferredWindowsCodexCommand(command, options) ??
+    resolveWindowsPwshCommand(command, options) ?? {
+      command,
+      args: []
+    }
+  );
+}
+
+export function ensureClaudeCommandReady(command: string, options: ResolveClaudeCommandOptions = {}): ResolvedCommand {
+  const resolvedCommand = resolveClaudeCommand(command, options);
+  const platform = currentPlatform(options);
+
+  if (platform !== "win32") {
+    if (path.isAbsolute(resolvedCommand.command) && !fileExists(resolvedCommand.command)) {
+      throw new Error(`Claude executable not found: ${resolvedCommand.command}`);
+    }
+    return resolvedCommand;
+  }
+
+  if (
+    resolvedCommand.command !== "pwsh" &&
+    WINDOWS_DIRECT_EXECUTABLE_EXTENSIONS.has(path.extname(resolvedCommand.command).toLowerCase()) &&
+    !fileExists(resolvedCommand.command)
+  ) {
+    throw new Error(`Claude executable not found: ${resolvedCommand.command}`);
+  }
+
+  return resolvedCommand;
+}
+
+export function resolveClaudeCommand(command: string, options: ResolveClaudeCommandOptions = {}): ResolvedCommand {
+  const platform = currentPlatform(options);
+  if (platform === "darwin") {
+    return resolvePreferredMacClaudeCommand(command, options) ?? { command, args: [] };
+  }
+
+  if (platform !== "win32") {
+    return {
+      command,
+      args: []
+    };
+  }
+
+  return (
+    resolvePreferredWindowsClaudeCommand(command, options) ??
     resolveWindowsPwshCommand(command, options) ?? {
       command,
       args: []
